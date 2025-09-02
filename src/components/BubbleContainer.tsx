@@ -13,6 +13,7 @@ interface Bubble {
   color: string;
   originalSize: number;
   isStacked: boolean;
+  isFadingOut: boolean;
   lastMoveTime: number;
   lastPosition: { x: number; y: number };
   name: string;
@@ -133,6 +134,7 @@ const BubbleContainer: React.FC = () => {
         color: colors[0],
         originalSize: 100,
         isStacked: false,
+        isFadingOut: false,
         lastMoveTime: 0,
         lastPosition: { x: 0, y: 0 },
         name: names[0],
@@ -150,6 +152,7 @@ const BubbleContainer: React.FC = () => {
     newBubble.name = names[Math.floor(Math.random() * names.length)];
     newBubble.description = descriptions[Math.floor(Math.random() * descriptions.length)];
     newBubble.isStacked = false;
+    newBubble.isFadingOut = false;
     newBubble.lastMoveTime = Date.now();
     newBubble.lastPosition = { x: newBubble.x, y: newBubble.y };
 
@@ -186,6 +189,32 @@ const BubbleContainer: React.FC = () => {
 
     // Handle bubble stacking and collision
   const handleBubblePhysics = (bubble: Bubble, allBubbles: Bubble[]) => {
+    // Handle fading out bubbles
+    if (bubble.isFadingOut) {
+      // Gradually reduce opacity and size
+      const newOpacity = bubble.opacity * 0.95; // Reduce opacity by 5% each frame
+      const newSize = bubble.size * 0.98; // Reduce size by 2% each frame
+      let newY = bubble.y + bubble.velocityY;
+      let newX = bubble.x + bubble.velocityX;
+
+      // Remove bubble when it's almost transparent or very small
+      if (newOpacity < 0.05 || newSize < 10) {
+        bubblePool.release(bubble);
+        return null;
+      }
+
+      return {
+        ...bubble,
+        x: newX,
+        y: newY,
+        size: newSize,
+        opacity: newOpacity,
+        lastMoveTime: Date.now(),
+        lastPosition: { x: newX, y: newY },
+      };
+    }
+
+    // Normal bubble physics for non-fading bubbles
     let newY = bubble.y + bubble.velocityY;
     let newX = bubble.x + bubble.velocityX;
     const newSize = bubble.size;
@@ -202,11 +231,22 @@ const BubbleContainer: React.FC = () => {
       newVelocityX = -Math.abs(newVelocityX) * 0.8;
     }
 
-    // Handle stacking at the top
+    // Handle bubbles reaching the top - start fade out instead of stacking
     if (newY <= bubble.size / 2) {
       newY = bubble.size / 2;
-      newVelocityY = 0;
-      isStacked = true;
+      // Allow a slight upward movement to continue the fade-out effect
+      newVelocityY = -0.1;
+      // Start fade-out process instead of stacking
+      return {
+        ...bubble,
+        x: newX,
+        y: newY,
+        velocityY: newVelocityY,
+        velocityX: newVelocityX,
+        isFadingOut: true,
+        lastMoveTime: Date.now(),
+        lastPosition: { x: newX, y: newY },
+      };
     }
 
     // Check collisions with nearby bubbles only (spatial partitioning)
@@ -238,15 +278,15 @@ const BubbleContainer: React.FC = () => {
     }
 
     // Prevent bubbles from getting stuck by adding small random movement
-    if (collisionCount > 0 || (Math.abs(newVelocityY) < 0.1 && !isStacked)) {
+    if (collisionCount > 0 || (Math.abs(newVelocityY) < 0.1 && !isStacked && !bubble.isFadingOut)) {
       // Add small random movement to unstuck bubbles (reduced frequency)
       if (Math.random() < 0.1) { // Only 10% chance per frame
         newVelocityX += (Math.random() - 0.5) * 0.1; // Reduced magnitude
         newVelocityY += (Math.random() - 0.5) * 0.1; // Reduced magnitude
       }
 
-      // Ensure minimum upward movement for non-stacked bubbles
-      if (!isStacked && newVelocityY > -0.2) {
+      // Ensure minimum upward movement for non-stacked and non-fading bubbles
+      if (!isStacked && !bubble.isFadingOut && newVelocityY > -0.2) {
         newVelocityY = -0.2;
       }
     }
@@ -260,18 +300,17 @@ const BubbleContainer: React.FC = () => {
     );
 
     // If bubble hasn't moved much in 3 seconds, give it a boost (increased from 2s to 3s)
-    if (timeSinceLastMove > 3000 && distanceMoved < 10 && !isStacked) {
+    // Don't boost bubbles that are fading out
+    if (timeSinceLastMove > 3000 && distanceMoved < 10 && !isStacked && !bubble.isFadingOut) {
       newVelocityY = -0.8; // Reduced boost strength from -1.0 to -0.8
       newVelocityX += (Math.random() - 0.5) * 0.5; // Reduced random boost from 1.0 to 0.5
     }
 
-    // Add some natural movement when stacked
-    if (isStacked && !bubble.isStacked) {
-      newVelocityX = (Math.random() - 0.5) * 0.2;
-    }
+    // We no longer need to add natural movement for stacked bubbles
+    // since bubbles now fade out instead of stacking
 
-    // Remove bubbles that are too small or off-screen
-    if (bubble.size < 30 || newY < -100) {
+    // Remove bubbles that are too small or off-screen (but not those that are fading out)
+    if ((bubble.size < 30 || newY < -100) && !bubble.isFadingOut) {
       // Return bubble to pool before removing
       bubblePool.release(bubble);
       return null;
@@ -289,6 +328,7 @@ const BubbleContainer: React.FC = () => {
       velocityY: smoothedVelocityY,
       velocityX: smoothedVelocityX,
       isStacked,
+      isFadingOut: bubble.isFadingOut, // Preserve the fading out state
       lastMoveTime: currentTime,
       lastPosition: { x: newX, y: newY },
     };
@@ -364,9 +404,9 @@ const BubbleContainer: React.FC = () => {
             backgroundColor: bubble.color,
             opacity: bubble.opacity,
             transform: `translate(-50%, -50%)`,
-            transition: bubble.isStacked ? 'all 0.3s ease-out' : 'all 0.1s ease-out',
+            transition: bubble.isFadingOut ? 'all 0.5s ease-out' : 'all 0.1s ease-out',
             boxShadow: `0 0 ${bubble.size * 0.4}px ${bubble.color}, inset 0 0 ${bubble.size * 0.1}px rgba(255, 255, 255, 0.3)`,
-            filter: bubble.isStacked ? 'brightness(1.1)' : 'brightness(1)',
+            filter: bubble.isFadingOut ? 'brightness(1.2)' : 'brightness(1)',
           }}
         >
           <div className="text-white font-bold text-xs leading-tight px-2">
