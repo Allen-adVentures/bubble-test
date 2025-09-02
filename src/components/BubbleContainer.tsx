@@ -7,13 +7,16 @@ interface Bubble {
   x: number;
   y: number;
   size: number;
+  targetSize?: number;
   velocityY: number;
   velocityX: number;
   opacity: number;
   color: string;
   originalSize: number;
   isStacked: boolean;
-  isFadingOut: boolean;
+  isFadingOut: boolean; // legacy flag, no longer used
+  isPopping?: boolean;
+  popStartTime?: number;
   lastMoveTime: number;
   lastPosition: { x: number; y: number };
   name: string;
@@ -55,6 +58,7 @@ class BubblePool {
 const BubbleContainer: React.FC = () => {
   const containerRef = useRef<HTMLDivElement>(null);
   const bubblesRef = useRef<Bubble[]>([]);
+  const contentSizeMapRef = useRef<Map<number, { w: number; h: number }>>(new Map());
   const [renderBubbles, setRenderBubbles] = useState<Bubble[]>([]);
   const [containerHeight, setContainerHeight] = useState(0);
   const [containerWidth, setContainerWidth] = useState(0);
@@ -67,8 +71,19 @@ const BubbleContainer: React.FC = () => {
   const lastRenderTime = useRef(0);
   const RENDER_THROTTLE = 16; // ~60fps
 
-  // Generate random colors for bubbles
-  const colors = [
+  // Ref callback to measure bubble content size per bubble id
+  const setMeasureRef = useCallback((id: number) => (el: HTMLDivElement | null) => {
+    if (!el) return;
+    const width = el.offsetWidth;
+    const height = el.offsetHeight;
+    const prev = contentSizeMapRef.current.get(id);
+    if (!prev || prev.w !== width || prev.h !== height) {
+      contentSizeMapRef.current.set(id, { w: width, h: height });
+    }
+  }, []);
+
+  // Generate random colors for bubbles (memoized for stable reference)
+  const colors = useMemo(() => [
     'rgba(255, 182, 193, 0.8)',   // Light pink
     'rgba(173, 216, 230, 0.8)',   // Light blue
     'rgba(144, 238, 144, 0.8)',   // Light green
@@ -79,25 +94,36 @@ const BubbleContainer: React.FC = () => {
     'rgba(240, 248, 255, 0.8)',   // Alice blue
     'rgba(255, 192, 203, 0.8)',   // Pink
     'rgba(135, 206, 235, 0.8)',   // Sky blue
-  ];
+  ], []);
 
-  // Random names for bubbles
-  const names = [
+  // Random names for bubbles (memoized for stable reference)
+  const names = useMemo(() => [
     'Alice', 'Bob', 'Charlie', 'Diana', 'Eve', 'Frank', 'Grace', 'Henry',
     'Iris', 'Jack', 'Kate', 'Liam', 'Maya', 'Noah', 'Olivia', 'Paul',
     'Quinn', 'Ruby', 'Sam', 'Tina', 'Uma', 'Victor', 'Wendy', 'Xander',
     'Yara', 'Zoe', 'Alex', 'Blake', 'Casey', 'Drew', 'Emery', 'Finley'
-  ];
+  ], []);
 
-  // Random descriptions for bubbles
-  const descriptions = [
+  // Random descriptions for bubbles (memoized for stable reference)
+  const descriptions = useMemo(() => [
     'Floating dreamer', 'Ocean explorer', 'Sky wanderer', 'Cloud dancer',
     'Wind whisperer', 'Light seeker', 'Hope carrier', 'Joy bringer',
     'Peace keeper', 'Love holder', 'Dream maker', 'Star follower',
     'Moon child', 'Sun seeker', 'Rainbow rider', 'Storm chaser',
     'Wave rider', 'Mountain climber', 'Forest walker', 'River runner',
     'Desert wanderer', 'Arctic explorer', 'Tropical dreamer', 'Cosmic traveler'
-  ];
+  ], []);
+
+  // Ensure descriptions meet a minimum length of 300 characters
+  const generateLongDescription = useCallback(() => {
+    let result = '';
+    // Combine random phrases until we reach at least 300 characters
+    while (result.length < 300) {
+      const phrase = descriptions[Math.floor(Math.random() * descriptions.length)];
+      result += (result ? ' ' : '') + phrase;
+    }
+    return result;
+  }, [descriptions]);
 
   // Initialize container dimensions
   useEffect(() => {
@@ -127,14 +153,16 @@ const BubbleContainer: React.FC = () => {
         id: ++lastBubbleId.current,
         x: 0,
         y: 0,
-        size: 100,
+        size: 260,
+        targetSize: 260,
         velocityY: 0,
         velocityX: 0,
         opacity: 0.6,
         color: colors[0],
-        originalSize: 100,
+        originalSize: 260,
         isStacked: false,
         isFadingOut: false,
+        isPopping: false,
         lastMoveTime: 0,
         lastPosition: { x: 0, y: 0 },
         name: names[0],
@@ -150,14 +178,18 @@ const BubbleContainer: React.FC = () => {
     newBubble.opacity = Math.random() * 0.4 + 0.6;
     newBubble.color = colors[Math.floor(Math.random() * colors.length)];
     newBubble.name = names[Math.floor(Math.random() * names.length)];
-    newBubble.description = descriptions[Math.floor(Math.random() * descriptions.length)];
+    newBubble.description = generateLongDescription();
+    newBubble.size = 260;
+    newBubble.targetSize = 260;
+    newBubble.originalSize = 260;
     newBubble.isStacked = false;
     newBubble.isFadingOut = false;
+    newBubble.isPopping = false;
     newBubble.lastMoveTime = Date.now();
     newBubble.lastPosition = { x: newBubble.x, y: newBubble.y };
 
     bubblesRef.current = [...bubblesRef.current, newBubble];
-  }, [containerWidth, containerHeight, bubblePool]);
+  }, [containerWidth, bubblePool, containerHeight, colors, names, descriptions, generateLongDescription]);
 
   // Optimized collision detection with spatial partitioning
   const checkCollision = useCallback((bubble1: Bubble, bubble2: Bubble) => {
@@ -188,39 +220,46 @@ const BubbleContainer: React.FC = () => {
   }, []);
 
     // Handle bubble stacking and collision
-  const handleBubblePhysics = (bubble: Bubble, allBubbles: Bubble[]) => {
+  const handleBubblePhysics = useCallback((bubble: Bubble, allBubbles: Bubble[]) => {
     // Handle fading out bubbles
-    if (bubble.isFadingOut) {
-      // Gradually reduce opacity and size
-      const newOpacity = bubble.opacity * 0.95; // Reduce opacity by 5% each frame
-      const newSize = bubble.size * 0.98; // Reduce size by 2% each frame
-      let newY = bubble.y + bubble.velocityY;
-      let newX = bubble.x + bubble.velocityX;
-
-      // Remove bubble when it's almost transparent or very small
-      if (newOpacity < 0.05 || newSize < 10) {
+    if (bubble.isPopping) {
+      const durationMs = 150;
+      const start = bubble.popStartTime ?? Date.now();
+      const elapsed = Date.now() - start;
+      const clamped = Math.min(1, Math.max(0, elapsed / durationMs));
+      const easeOut = 1 - Math.pow(1 - clamped, 3);
+      const newSize = bubble.originalSize * (1 + 0.6 * easeOut);
+      const newOpacity = 1 - easeOut;
+      if (clamped >= 1) {
         bubblePool.release(bubble);
         return null;
       }
-
       return {
         ...bubble,
-        x: newX,
-        y: newY,
         size: newSize,
         opacity: newOpacity,
+        popStartTime: start,
         lastMoveTime: Date.now(),
-        lastPosition: { x: newX, y: newY },
+        lastPosition: { x: bubble.x, y: bubble.y },
       };
     }
 
     // Normal bubble physics for non-fading bubbles
     let newY = bubble.y + bubble.velocityY;
     let newX = bubble.x + bubble.velocityX;
-    const newSize = bubble.size;
+    // Adjust size towards measured content size (if available)
+    const measured = contentSizeMapRef.current.get(bubble.id);
+    const padding = 28; // px padding around content
+    const minSize = 180;
+    const maxSize = 420;
+    const desiredSize = measured
+      ? Math.max(minSize, Math.min(maxSize, Math.max(measured.w, measured.h) + padding))
+      : (bubble.targetSize ?? bubble.size);
+    const newTargetSize = desiredSize;
+    const newSize = bubble.size * 0.85 + newTargetSize * 0.15; // smooth approach
     let newVelocityY = bubble.velocityY;
     let newVelocityX = bubble.velocityX;
-    let isStacked = bubble.isStacked;
+    const isStacked = bubble.isStacked;
 
     // Bounce off walls with some energy loss
     if (newX <= bubble.size / 2) {
@@ -231,19 +270,18 @@ const BubbleContainer: React.FC = () => {
       newVelocityX = -Math.abs(newVelocityX) * 0.8;
     }
 
-    // Handle bubbles reaching the top - start fade out instead of stacking
+    // Handle bubbles reaching the top - pop instead of stacking
     if (newY <= bubble.size / 2) {
       newY = bubble.size / 2;
-      // Allow a slight upward movement to continue the fade-out effect
-      newVelocityY = -0.1;
-      // Start fade-out process instead of stacking
+      // Trigger pop animation
       return {
         ...bubble,
         x: newX,
         y: newY,
-        velocityY: newVelocityY,
-        velocityX: newVelocityX,
-        isFadingOut: true,
+        velocityY: 0,
+        velocityX: 0,
+        isPopping: true,
+        popStartTime: Date.now(),
         lastMoveTime: Date.now(),
         lastPosition: { x: newX, y: newY },
       };
@@ -325,17 +363,18 @@ const BubbleContainer: React.FC = () => {
       x: newX,
       y: newY,
       size: newSize,
+      targetSize: newTargetSize,
       velocityY: smoothedVelocityY,
       velocityX: smoothedVelocityX,
       isStacked,
-      isFadingOut: bubble.isFadingOut, // Preserve the fading out state
+      isFadingOut: bubble.isFadingOut,
       lastMoveTime: currentTime,
       lastPosition: { x: newX, y: newY },
     };
-  };
+  }, [containerWidth, bubblePool, getNearbyBubbles, checkCollision]);
 
   // Animation loop
-  const animate = () => {
+  const animate = useCallback(() => {
     const currentBubbles = bubblesRef.current;
     const updatedBubbles = currentBubbles.map(bubble =>
       handleBubblePhysics(bubble, currentBubbles)
@@ -352,7 +391,7 @@ const BubbleContainer: React.FC = () => {
     }
 
     animationRef.current = requestAnimationFrame(animate);
-  };
+  }, [handleBubblePhysics]);
 
   // Start animation
   useEffect(() => {
@@ -368,18 +407,18 @@ const BubbleContainer: React.FC = () => {
       bubblesRef.current = [];
       setRenderBubbles([]);
     };
-  }, [containerHeight, bubblePool]);
+  }, [containerHeight, bubblePool, animate]);
 
   // Create new bubbles periodically
   useEffect(() => {
     const interval = setInterval(() => {
-      if (bubblesRef.current.length < 60) { // Limit total bubbles
+      if (bubblesRef.current.length < 30) { // Limit total bubbles
         createBubble();
       }
     }, 800); // Slightly faster bubble creation
 
     return () => clearInterval(interval);
-  }, [containerWidth]);
+  }, [containerWidth, createBubble]);
 
   return (
     <div
@@ -388,7 +427,7 @@ const BubbleContainer: React.FC = () => {
       style={{ minHeight: '100vh' }}
     >
       {/* Bubble Counter */}
-      <div className="absolute top-4 right-4 z-10 bg-white/20 backdrop-blur-sm rounded-lg px-3 py-2 text-white font-mono text-sm">
+      <div className="absolute top-4 right-4 z-10 bg-white/20 backdrop-blur-sm rounded-lg px-3 py-2 text-white font-mono text-base">
         Bubbles: {renderBubbles.length}
       </div>
 
@@ -409,10 +448,23 @@ const BubbleContainer: React.FC = () => {
             filter: bubble.isFadingOut ? 'brightness(1.2)' : 'brightness(1)',
           }}
         >
-          <div className="text-white font-bold text-xs leading-tight px-2">
+          {/* Hidden measuring block to compute content size */}
+          <div
+            ref={setMeasureRef(bubble.id)}
+            className="absolute opacity-0 pointer-events-none"
+            style={{ position: 'absolute', maxWidth: 380 }}
+          >
+            <div className="text-white font-bold text-lg leading-tight px-4 text-center break-words whitespace-normal">
+              {bubble.name}
+            </div>
+            <div className="text-white/80 text-sm leading-tight px-4 -mt-1 text-center break-words whitespace-normal">
+              {bubble.description}
+            </div>
+          </div>
+          <div className="text-white font-bold text-lg leading-tight px-4 text-center break-words whitespace-normal">
             {bubble.name}
           </div>
-          <div className="text-white/80 text-xs leading-tight px-2 -mt-1">
+          <div className="text-white/80 text-sm leading-tight px-4 -mt-1 text-center break-words whitespace-normal">
             {bubble.description}
           </div>
         </div>
